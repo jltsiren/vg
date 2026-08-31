@@ -50,7 +50,7 @@ constexpr size_t w() {
 }
 
 constexpr size_t subchain_length() {
-    return HaplotypePartitioner::SUBCHAIN_LENGTH;
+    return Haplotypes::SUBCHAIN_LENGTH;
 }
 
 constexpr size_t n() {
@@ -1047,6 +1047,7 @@ std::string format_kmer_presence(size_t present, size_t total) {
     return oss.str();
 }
 
+// FIXME: kmers_present -> compressed representation
 void density_statistics(const gbwtgraph::GBZ& gbz, const Haplotypes& haplotypes, const HaplotypesConfig& config) {
     if (config.verbosity == Haplotypes::verbosity_silent) {
         return;
@@ -1276,6 +1277,7 @@ void validate_chain(const Logger& logger,
         }
 
         // Check that the kmer presence bitvector is of appropriate length.
+        // FIXME: kmers_present -> compressed representation
         size_t total_kmers = subchain.sequences.size() * subchain.kmers.size();
         if (subchain.kmers_present.size() != total_kmers) {
             std::string message = expected_got<size_t>(total_kmers, subchain.kmers_present.size()) + " kmer occurrences";
@@ -1367,6 +1369,7 @@ void validate_chain(const Logger& logger,
                     }
                 }
                 for (size_t j = 0, offset = i * subchain.kmers.size(); j < subchain.kmers.size(); j++, offset++) {
+                    // FIXME: kmers_present -> compressed representation
                     if (subchain.kmers_present[offset]) {
                         auto iter = unique_minimizers.find(subchain.kmers[j]);
                         if (iter == unique_minimizers.end()) {
