@@ -164,6 +164,11 @@ public:
         /// in `kmers`.
         void for_each_kmer(size_t sequence, const std::function<void(size_t, bool)>& callback) const;
 
+        /// Calls `callback(kmer_id, num_present)` for each kmer in the given sequences,
+        /// identified by their indices in `sequences`, in the order the kmers are stored
+        /// in `kmers`.
+        void for_each_kmer(size_t first, size_t second, const std::function<void(size_t, size_t)>& callback) const;
+
         /// Scores every haplotype in the subchain. The score of a haplotype is the sum of
         /// `kmer_score(kmer_id, is_present)` over all kmers, and it is reported by calling
         /// `haplotype_score(sequence, score)`, where `sequence` is the index in `sequences`.
@@ -172,6 +177,21 @@ public:
             const std::function<double(size_t, bool)>& kmer_score,
             const std::function<void(size_t, double)>& haplotype_score
         ) const;
+
+        /// Returns the number of haplotypes in the subchain.
+        size_t num_haplotypes() const { return this->sequences.size(); }
+
+        /// Returns the number of kmers in the subchain.
+        size_t num_kmers() const { return this->kmers.size(); }
+
+        /// Returns the number of kmers present in the given haplotype.
+        size_t num_present(size_t i) const;
+
+        /// Returns the size of the kmer presence matrix.
+        size_t total_kmers() const { return this->sequences.size() * this->kmers.size(); }
+
+        /// Returns the total number of kmers present in the haplotypes.
+        size_t total_present() const;
 
         /// Returns the start node as a GBWTGraph handle.
         handle_t start_handle() const { return gbwtgraph::GBWTGraph::node_to_handle(this->start); }

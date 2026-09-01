@@ -166,7 +166,7 @@ Haplotypes HaplotypePartitioner::partition_haplotypes(const Parameters& paramete
             }
             total_subchains += result.chains[chain.offset].subchains.size();
             for (auto& subchain : result.chains[chain.offset].subchains) {
-                total_kmers += subchain.kmers.size();
+                total_kmers += subchain.num_kmers();
             }
         }
         #pragma omp critical
@@ -1564,7 +1564,7 @@ std::vector<std::pair<Recombinator::kmer_presence, double>> classify_kmers(
     // gets -1.0 * score.
     std::vector<std::pair<Recombinator::kmer_presence, double>> kmer_types;
     size_t selected_kmers = 0;
-    for (size_t kmer_id = 0; kmer_id < subchain.kmers.size(); kmer_id++) {
+    for (size_t kmer_id = 0; kmer_id < subchain.num_kmers(); kmer_id++) {
         double count = kmer_counts.at(subchain.kmers[kmer_id]);
         switch (parameters.scoring_model) {
         case Recombinator::Parameters::high_coverage_scoring:
@@ -1640,13 +1640,10 @@ std::vector<std::pair<size_t, double>> select_diploid(
     // and we sample extra fragments, the number of fragments will depend on
     // whether we take the same haplotype twice.
     for (size_t left = 0; left < candidates.size(); left++) {
-        size_t left_offset = candidates[left].first * subchain.kmers.size();
         for (size_t right = left; right < candidates.size(); right++) {
             std::int64_t score = 0;
-            size_t right_offset = candidates[right].first * subchain.kmers.size();
-            for (size_t kmer_id = 0; kmer_id < subchain.kmers.size(); kmer_id++) {
-                // FIXME: kmers_present -> compressed representation
-                int64_t found = subchain.kmers_present[left_offset + kmer_id] + subchain.kmers_present[right_offset + kmer_id];
+            subchain.for_each_kmer(candidates[left].first, candidates[right].first, [&](size_t kmer_id, size_t num_present) {
+                std::int64_t found = num_present;
                 switch (kmer_types[kmer_id].first) {
                 case Recombinator::absent:
                     score += 1 - found; // +1 for 0, 0 for 1, -1 for 2
@@ -1660,7 +1657,7 @@ std::vector<std::pair<size_t, double>> select_diploid(
                 default:
                     break;
                 }
-            }
+            });
             if (score > best_score) {
                 best_score = score;
                 best_left = left;
@@ -1709,7 +1706,7 @@ std::vector<std::pair<size_t, double>> select_haplotypes(
     // Select the haplotypes greedily.
     std::vector<std::pair<size_t, double>> selected_haplotypes;
     std::vector<std::pair<size_t, double>> remaining_haplotypes;
-    for (size_t seq_offset = 0; seq_offset < subchain.sequences.size(); seq_offset++) {
+    for (size_t seq_offset = 0; seq_offset < subchain.num_haplotypes(); seq_offset++) {
         // Metadata to make sure this haplotype isn't among the banned
         gbwt::size_type sequence_id = subchain.sequences[seq_offset].first;
         gbwt::size_type path_id = gbwt::Path::id(sequence_id);
@@ -1719,7 +1716,7 @@ std::vector<std::pair<size_t, double>> select_haplotypes(
             remaining_haplotypes.push_back( { seq_offset, 0.0 });
         }
     }
-    std::vector<double> scores(subchain.sequences.size(), 0.0);
+    std::vector<double> scores(subchain.num_haplotypes(), 0.0);
     while (selected_haplotypes.size() < parameters.num_haplotypes && !remaining_haplotypes.empty()) {
         // Score the haplotypes. We score all of them, as that is cheaper than
         // determining which ones are still relevant.
@@ -1815,7 +1812,7 @@ Recombinator::Statistics Recombinator::generate_haplotypes(const Haplotypes::Top
         auto& subchain = chain.subchains.front();
         for (size_t haplotype = 0; haplotype < haplotypes.size(); haplotype++) {
             assert(!subchain.sequences.empty());
-            size_t seq = haplotype % subchain.sequences.size();
+            size_t seq = haplotype % subchain.num_haplotypes();
             haplotypes[haplotype].take(subchain.sequences[seq].first);
         }
         statistics.full_haplotypes = 1;
