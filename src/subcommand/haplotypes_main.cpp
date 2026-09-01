@@ -1368,23 +1368,23 @@ void validate_chain(const Logger& logger,
                         }
                     }
                 }
-                for (size_t j = 0, offset = i * subchain.kmers.size(); j < subchain.kmers.size(); j++, offset++) {
-                    // FIXME: kmers_present -> compressed representation
-                    if (subchain.kmers_present[offset]) {
-                        auto iter = unique_minimizers.find(subchain.kmers[j]);
+                subchain.for_each_kmer(i, [&](size_t j, bool is_present) {
+                    auto iter = unique_minimizers.find(subchain.kmers[j]);
+                    if (is_present) {
                         if (iter == unique_minimizers.end()) {
                             std::string message = "kmer " + std::to_string(j) + " not present in the haplotype";
                             validate_error_sequence(logger, chain_id, subchain_id, i, message);
+                        } else {
+                            iter->second = true;
                         }
                         used_kmers[subchain.kmers[j]]++;
-                        iter->second = true;
                     } else {
-                        if (unique_minimizers.find(subchain.kmers[j]) != unique_minimizers.end()) {
+                        if (iter != unique_minimizers.end()) {
                             std::string message = "kmer " + std::to_string(j) + " is present in the haplotype";
                             validate_error_sequence(logger, chain_id, subchain_id, i, message);
                         }
                     }
-                }
+                });
                 for (auto iter = unique_minimizers.begin(); iter != unique_minimizers.end(); ++iter) {
                     if (!iter->second) {
                         missing_kmers[iter->first]++;

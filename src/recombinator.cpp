@@ -1719,17 +1719,21 @@ std::vector<std::pair<size_t, double>> select_haplotypes(
             remaining_haplotypes.push_back( { seq_offset, 0.0 });
         }
     }
+    std::vector<double> scores(subchain.sequences.size(), 0.0);
     while (selected_haplotypes.size() < parameters.num_haplotypes && !remaining_haplotypes.empty()) {
-        // Score the remaining haplotypes.
-        for (size_t i = 0; i < remaining_haplotypes.size(); i++) {
-            size_t offset = remaining_haplotypes[i].first * subchain.kmers.size();
-            double score = 0.0;
-            for (size_t kmer_id = 0; kmer_id < subchain.kmers.size(); kmer_id++) {
-                // FIXME: kmers_present -> compressed representation
-                double multiplier = -1.0 + 2.0 * subchain.kmers_present[offset + kmer_id];
-                score += multiplier * kmer_types[kmer_id].second;
+        // Score the haplotypes. We score all of them, as that is cheaper than
+        // determining which ones are still relevant.
+        subchain.score_haplotypes(
+            [&](size_t kmer_id, bool is_present) -> double {
+                double multiplier = -1.0 + 2.0 * is_present;
+                return multiplier * kmer_types[kmer_id].second;
+            },
+            [&](size_t haplotype_id, double score) {
+                scores[haplotype_id] = score;
             }
-            remaining_haplotypes[i].second = score;
+        );
+        for (size_t i = 0; i < remaining_haplotypes.size(); i++) {
+            remaining_haplotypes[i].second = scores[remaining_haplotypes[i].first];
         }
 
         // Report ranks and scores for each remaining haplotype.
@@ -1759,22 +1763,20 @@ std::vector<std::pair<size_t, double>> select_haplotypes(
         remaining_haplotypes.erase(remaining_haplotypes.begin() + selected);
 
         // Adjust kmer scores based on the selected haplotype.
-        // FIXME: kmers_present -> compressed representation
-        size_t offset = selected_haplotypes.back().first * subchain.kmers.size();
-        for (size_t kmer_id = 0; kmer_id < subchain.kmers.size(); kmer_id++) {
+        subchain.for_each_kmer(selected_haplotypes.back().first, [&](size_t kmer_id, bool is_present) {
             switch (kmer_types[kmer_id].first) {
             case Recombinator::heterozygous:
-                kmer_types[kmer_id].second += (subchain.kmers_present[offset + kmer_id] ? -1.0 : 1.0) * parameters.het_adjustment;
+                kmer_types[kmer_id].second += (is_present ? -1.0 : 1.0) * parameters.het_adjustment;
                 break;
             case Recombinator::present:
-                if (subchain.kmers_present[offset + kmer_id]) {
+                if (is_present) {
                     kmer_types[kmer_id].second *= parameters.present_discount;
                 }
                 break;
             default:
                 break;
             }
-        }
+        });
     }
 
     if (parameters.diploid_sampling) {

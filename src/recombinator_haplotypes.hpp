@@ -9,6 +9,7 @@
 #include "gbwtgraph_helper.hpp"
 #include "hash_map.hpp"
 
+#include <functional>
 #include <iostream>
 
 namespace vg {
@@ -16,12 +17,8 @@ namespace vg {
 //------------------------------------------------------------------------------
 
 // FIXME: version 7 with compressed k-mer matrices. and tests
-// start with creating an interface for iterating over the haplotypes:
-// * iterate over all k-mers in the given haplotype
-// * iterate over all haplotypes and score them. needs two functions:
-//   * kmer_score(kmer_id, is_present) -> score_adjustment (flips handled as -kmer_score(kmer_id, old) + kmer_score(kmer_id, new))
-//   * haplotype_score(haplotype_id, score) for reporting the score
-//   * this must be parameterized over score types (int64_t, double)
+
+// FIXME: the haplotype scoring interface must be parameterized over score types (int64_t, double)
 
 // FIXME: version 7: each top-level chain should know the default scoring model for that chain
 
@@ -161,6 +158,20 @@ public:
         /// A bit vector marking the presence of kmers in the sequences.
         /// Sequence `i` contains kmer `j` if and only if `kmers_present[i * kmers.size() + j] == 1`.
         sdsl::bit_vector kmers_present;
+
+        /// Calls `callback(kmer_id, is_present)` for each kmer in the given sequence,
+        /// identified by its index in `sequences`, in the order the kmers are stored
+        /// in `kmers`.
+        void for_each_kmer(size_t sequence, const std::function<void(size_t, bool)>& callback) const;
+
+        /// Scores every haplotype in the subchain. The score of a haplotype is the sum of
+        /// `kmer_score(kmer_id, is_present)` over all kmers, and it is reported by calling
+        /// `haplotype_score(sequence, score)`, where `sequence` is the index in `sequences`.
+        /// Iteration order and the number of `kmer_score` calls are unspecified.
+        void score_haplotypes(
+            const std::function<double(size_t, bool)>& kmer_score,
+            const std::function<void(size_t, double)>& haplotype_score
+        ) const;
 
         /// Returns the start node as a GBWTGraph handle.
         handle_t start_handle() const { return gbwtgraph::GBWTGraph::node_to_handle(this->start); }

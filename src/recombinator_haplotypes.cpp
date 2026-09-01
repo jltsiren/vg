@@ -129,6 +129,29 @@ std::string Haplotypes::Subchain::to_string() const {
     return result;
 }
 
+// FIXME: kmers_present -> compressed representation
+void Haplotypes::Subchain::for_each_kmer(size_t sequence, const std::function<void(size_t, bool)>& callback) const {
+    size_t offset = sequence * this->kmers.size();
+    for (size_t kmer_id = 0; kmer_id < this->kmers.size(); kmer_id++) {
+        callback(kmer_id, this->kmers_present[offset + kmer_id]);
+    }
+}
+
+// FIXME: kmers_present -> compressed representation
+void Haplotypes::Subchain::score_haplotypes(
+    const std::function<double(size_t, bool)>& kmer_score,
+    const std::function<void(size_t, double)>& haplotype_score
+) const {
+    for (size_t sequence = 0; sequence < this->sequences.size(); sequence++) {
+        size_t offset = sequence * this->kmers.size();
+        double score = 0.0;
+        for (size_t kmer_id = 0; kmer_id < this->kmers.size(); kmer_id++) {
+            score += kmer_score(kmer_id, this->kmers_present[offset + kmer_id]);
+        }
+        haplotype_score(sequence, score);
+    }
+}
+
 size_t Haplotypes::Subchain::distance(const gbwtgraph::GBZ& gbz, size_t i) const {
     if (this->type != normal || i >= this->sequences.size()) {
         return 0;
