@@ -106,7 +106,7 @@ TEST_CASE("Scoring the haplotypes in a subchain", "[haplotypes]") {
 
     SECTION("every haplotype is scored once in order") {
         std::vector<double> scores;
-        subchain.score_haplotypes(
+        subchain.score_sequences(
             kmer_score,
             [&](size_t haplotype_id, double score) {
                 REQUIRE(haplotype_id == scores.size());
@@ -125,7 +125,7 @@ TEST_CASE("Scoring the haplotypes in a subchain", "[haplotypes]") {
 
     SECTION("every kmer of every haplotype is visited once") {
         std::vector<size_t> visits(subchain.kmers.size(), 0);
-        subchain.score_haplotypes(
+        subchain.score_sequences(
             [&](size_t kmer_id, bool) -> double { visits[kmer_id]++; return 0.0; },
             [&](size_t, double) {}
         );
@@ -137,7 +137,7 @@ TEST_CASE("Scoring the haplotypes in a subchain", "[haplotypes]") {
     SECTION("no kmers") {
         Haplotypes::Subchain empty = build_subchain({ "", "", "" }, 0);
         std::vector<double> scores;
-        empty.score_haplotypes(
+        empty.score_sequences(
             [&](size_t, bool) -> double { REQUIRE(false); return 1.0; },
             [&](size_t haplotype_id, double score) {
                 REQUIRE(haplotype_id == scores.size());
@@ -153,7 +153,7 @@ TEST_CASE("Scoring the haplotypes in a subchain", "[haplotypes]") {
     SECTION("no haplotypes") {
         Haplotypes::Subchain empty = build_subchain({}, 5);
         size_t calls = 0;
-        empty.score_haplotypes(
+        empty.score_sequences(
             [&](size_t, bool) -> double { REQUIRE(false); return 1.0; },
             [&](size_t, double) { calls++; }
         );

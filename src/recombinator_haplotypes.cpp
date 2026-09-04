@@ -23,6 +23,218 @@ constexpr std::uint64_t Haplotypes::Header::DEFAULT_K;
 
 //------------------------------------------------------------------------------
 
+KmerPresenceMatrix::KmerPresenceMatrix() : num_sequences(0), num_kmers(0) {   
+}
+
+KmerPresenceMatrix::KmerPresenceMatrix(size_t num_sequences, size_t num_kmers, sdsl::bit_vector&& matrix, bool compress) :
+    num_sequences(num_sequences), num_kmers(num_kmers),
+    arrays(3 * num_sequences, 0, sdsl::bits::length((num_sequences == 0 ? 0 : num_sequences - 1)))
+{
+    if (matrix.size() != num_sequences * num_kmers) {
+        throw std::runtime_error("KmerPresenceMatrix: inconsistent matrix size");
+    }
+
+    if (compress) {
+        // FIXME: implement compression
+        throw std::runtime_error("KmerPresenceMatrix: compression not implemented");
+    } else {
+        for (size_t i = 0; i < this->num_sequences; i++) {
+            this->arrays[i] = i;
+            this->arrays[this->num_sequences + i] = i;
+            this->arrays[2 * this->num_sequences + i] = i;
+        }
+        this->parents = std::move(matrix);
+        this->children = sdsl::sd_vector<>();
+    }
+}
+
+size_t KmerPresenceMatrix::get_num_present(size_t sequence) const {
+    if (sequence >= this->num_sequences || this->num_kmers == 0) {
+        return 0;
+    }
+
+    size_t rank = this->sequence_to_rank(sequence);
+    size_t parent = this->parent_rank(rank);
+    size_t parent_start = parent * this->num_kmers;
+    size_t result = 0;
+
+    // First count the number of present kmers in the parent.
+    for (size_t kmer_id = 0; kmer_id < this->num_kmers; kmer_id += 64) {
+        size_t bits = std::min(static_cast<size_t>(64), this->num_kmers - kmer_id);
+        std::uint64_t word = this->parents.get_int(parent_start + kmer_id, bits);
+        result += sdsl::bits::cnt(word);
+    }
+
+    // Then handle the bits that are different in the child.
+    if (!this->is_parent(rank)) {
+        ChildIterator child_iter(*this, rank);
+        while (!child_iter.end()) {
+            size_t kmer_id = child_iter.kmer_id();
+            if (this->parents[parent_start + kmer_id]) {
+                result -= 1;
+            } else {
+                result += 1;
+            }
+            ++child_iter;
+        }
+    }
+
+    return result;
+}
+
+size_t KmerPresenceMatrix::get_total_present() const {
+    size_t result = 0;
+    size_t parent_start = 0;
+    size_t parent_present = 0;
+
+    // This duplicates the logic in `get_num_present` to avoid redundant work.
+    for (size_t rank = 0; rank < this->num_sequences; rank++) {
+        if (this->is_parent(rank)) {
+            parent_start = this->parent_rank(rank) * this->num_kmers;
+            parent_present = 0;
+            for (size_t kmer_id = 0; kmer_id < this->num_kmers; kmer_id += 64) {
+                size_t bits = std::min(static_cast<size_t>(64), this->num_kmers - kmer_id);
+                std::uint64_t word = this->parents.get_int(parent_start + kmer_id, bits);
+                parent_present += sdsl::bits::cnt(word);
+            }
+            result += parent_present;
+        } else {
+            result += parent_present;
+            ChildIterator child_iter(*this, rank);
+            while (!child_iter.end()) {
+                size_t kmer_id = child_iter.kmer_id();
+                if (this->parents[parent_start + kmer_id]) {
+                    result -= 1;
+                } else {
+                    result += 1;
+                }
+                ++child_iter;
+            }
+        }
+    }
+
+    return result;
+}
+
+void KmerPresenceMatrix::for_each_kmer(size_t sequence, const std::function<void(size_t, bool)>& callback) const {
+    Iterator iter(*this, sequence);
+    while (!iter.end()) {
+        callback(iter.kmer_id, iter.is_present);
+        ++iter;
+    }
+}
+
+void KmerPresenceMatrix::for_each_kmer(size_t first, size_t second, const std::function<void(size_t, size_t)>& callback) const {
+    Iterator first_iter(*this, first);
+    Iterator second_iter(*this, second);
+
+    while (!first_iter.end()) {
+        callback(first_iter.kmer_id, first_iter.is_present + second_iter.is_present);
+        ++first_iter;
+        ++second_iter;
+    }
+}
+
+void KmerPresenceMatrix::score_sequences(
+    const std::function<double(size_t, bool)>& kmer_score,
+    const std::function<void(size_t, double)>& sequence_score
+) const {
+    size_t parent_start = 0;
+    double parent_score = 0.0;
+
+    for (size_t rank = 0; rank < this->num_sequences; rank++) {
+        size_t sequence = this->rank_to_sequence(rank);
+        if (this->is_parent(rank)) {
+            parent_start = this->parent_rank(rank) * this->num_kmers;
+            parent_score = 0.0;
+            for (size_t kmer_id = 0; kmer_id < this->num_kmers; kmer_id++) {
+                parent_score += kmer_score(kmer_id, this->parents[parent_start + kmer_id]);
+            }
+            sequence_score(sequence, parent_score);
+        } else {
+            ChildIterator child_iter(*this, rank);
+            double child_score = parent_score;
+            while (!child_iter.end()) {
+                size_t kmer_id = child_iter.kmer_id();
+                bool was_present = this->parents[parent_start + kmer_id];
+                child_score -= kmer_score(kmer_id, was_present);
+                child_score += kmer_score(kmer_id, !was_present);
+                ++child_iter;
+            }
+            sequence_score(sequence, child_score);
+        }
+    }
+}
+
+void KmerPresenceMatrix::simple_sds_serialize(std::ostream& out) const {
+    // Since the dimensions are redundant, we do not store them.
+    this->arrays.simple_sds_serialize(out);
+    this->parents.simple_sds_serialize(out);
+    this->children.simple_sds_serialize(out);
+}
+
+void KmerPresenceMatrix::simple_sds_load(std::istream& in) {
+    this->arrays.simple_sds_load(in);
+    this->parents.simple_sds_load(in);
+    this->children.simple_sds_load(in);
+
+    this->num_sequences = this->arrays.size() / 3;
+    if (this->arrays.size() != this->num_sequences * 3) {
+        throw std::runtime_error("KmerPresenceMatrix: inconsistent array size");
+    }
+
+    if (this->num_sequences == 0) {
+        this->num_kmers = 0;
+    } else {
+        this->num_kmers = (this->parents.size() + this->children.size()) / this->num_sequences;
+    }
+    if (this->parents.size() + this->children.size() != this->num_kmers * this->num_sequences) {
+        throw std::runtime_error("KmerPresenceMatrix: inconsistent matrix size");
+    }
+}
+
+size_t KmerPresenceMatrix::simple_sds_size() const {
+    return this->arrays.simple_sds_size() + this->parents.simple_sds_size() + this->children.simple_sds_size();
+}
+
+KmerPresenceMatrix::Iterator::Iterator(const KmerPresenceMatrix& matrix, size_t sequence) :
+    matrix(matrix)
+{
+    size_t rank = this->matrix.sequence_to_rank(sequence);
+    this->parent_start = this->matrix.parent_rank(rank) * this->matrix.num_kmers;
+    if (!this->matrix.is_parent(rank)) {
+        this->child_start = this->matrix.child_rank(rank) * this->matrix.num_kmers;
+        this->child_iter = this->matrix.children.successor(this->child_start);
+    }
+
+    this->kmer_id = 0;
+    this->update_is_present();
+}
+
+void KmerPresenceMatrix::Iterator::operator++() {
+    ++this->kmer_id;
+    this->update_is_present();
+}
+
+void KmerPresenceMatrix::Iterator::update_is_present() {
+    if (!this->end()) {
+        this->is_present = this->matrix.parents[this->parent_start + this->kmer_id];
+        if (this->child_iter != this->matrix.children.one_end() && this->child_iter->second == this->child_start + this->kmer_id) {
+            this->is_present = !this->is_present;
+            ++this->child_iter;
+        }
+    }
+}
+
+KmerPresenceMatrix::ChildIterator::ChildIterator(const KmerPresenceMatrix& matrix, size_t rank) :
+    matrix(matrix)
+{
+    this->start = this->matrix.child_rank(rank) * this->matrix.num_kmers;
+    this->iter = this->matrix.children.successor(this->start);
+}
+
+//------------------------------------------------------------------------------
+
 hash_map<Haplotypes::Subchain::kmer_type, size_t>::iterator
 find_kmer(hash_map<Haplotypes::Subchain::kmer_type, size_t>& counts, Haplotypes::Subchain::kmer_type kmer, size_t k) {
     Haplotypes::Subchain::kmer_type rc = minimizer_reverse_complement(kmer, k);
@@ -147,7 +359,7 @@ void Haplotypes::Subchain::for_each_kmer(size_t first, size_t second, const std:
 }
 
 // FIXME: kmers_present -> compressed representation
-void Haplotypes::Subchain::score_haplotypes(
+void Haplotypes::Subchain::score_sequences(
     const std::function<double(size_t, bool)>& kmer_score,
     const std::function<void(size_t, double)>& haplotype_score
 ) const {
@@ -278,6 +490,7 @@ void load_subchain_header(Haplotypes::Subchain& subchain, std::istream& in) {
     }
 }
 
+// FIXME: also check individual dimensions
 void load_subchain_kmers_present(Haplotypes::Subchain& subchain, std::istream& in) {
     subchain.kmers_present.simple_sds_load(in);
     if (subchain.kmers_present.size() != subchain.kmers.size() * subchain.sequences.size()) {

@@ -1706,7 +1706,7 @@ std::vector<std::pair<size_t, double>> select_haplotypes(
     // Select the haplotypes greedily.
     std::vector<std::pair<size_t, double>> selected_haplotypes;
     std::vector<std::pair<size_t, double>> remaining_haplotypes;
-    for (size_t seq_offset = 0; seq_offset < subchain.num_haplotypes(); seq_offset++) {
+    for (size_t seq_offset = 0; seq_offset < subchain.num_sequences(); seq_offset++) {
         // Metadata to make sure this haplotype isn't among the banned
         gbwt::size_type sequence_id = subchain.sequences[seq_offset].first;
         gbwt::size_type path_id = gbwt::Path::id(sequence_id);
@@ -1716,11 +1716,11 @@ std::vector<std::pair<size_t, double>> select_haplotypes(
             remaining_haplotypes.push_back( { seq_offset, 0.0 });
         }
     }
-    std::vector<double> scores(subchain.num_haplotypes(), 0.0);
+    std::vector<double> scores(subchain.num_sequences(), 0.0);
     while (selected_haplotypes.size() < parameters.num_haplotypes && !remaining_haplotypes.empty()) {
         // Score the haplotypes. We score all of them, as that is cheaper than
         // determining which ones are still relevant.
-        subchain.score_haplotypes(
+        subchain.score_sequences(
             [&](size_t kmer_id, bool is_present) -> double {
                 double multiplier = -1.0 + 2.0 * is_present;
                 return multiplier * kmer_types[kmer_id].second;
@@ -1812,7 +1812,7 @@ Recombinator::Statistics Recombinator::generate_haplotypes(const Haplotypes::Top
         auto& subchain = chain.subchains.front();
         for (size_t haplotype = 0; haplotype < haplotypes.size(); haplotype++) {
             assert(!subchain.sequences.empty());
-            size_t seq = haplotype % subchain.num_haplotypes();
+            size_t seq = haplotype % subchain.num_sequences();
             haplotypes[haplotype].take(subchain.sequences[seq].first);
         }
         statistics.full_haplotypes = 1;
