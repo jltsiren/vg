@@ -1,12 +1,16 @@
 /** \file
  *
- * Unit tests for the kmer presence iterators in `Haplotypes::Subchain`.
+ * Unit tests for `KmerPresenceMatrix` and for the kmer presence iterators in
+ * `Haplotypes::Subchain`.
  */
 
 #include "catch.hpp"
 
 #include "../recombinator_haplotypes.hpp"
 
+#include <random>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace vg {
@@ -49,7 +53,331 @@ Haplotypes::Subchain build_subchain(const std::vector<std::string>& matrix, size
     return result;
 }
 
+/*
+  Builds an uncompressed kmer presence matrix from one string of '0' and '1'
+  characters per sequence, using the same convention as `build_subchain`.
+*/
+sdsl::bit_vector build_bitvector(const std::vector<std::string>& rows, size_t num_kmers) {
+    sdsl::bit_vector result(rows.size() * num_kmers, 0);
+    for (size_t i = 0; i < rows.size(); i++) {
+        REQUIRE(rows[i].length() == num_kmers);
+        for (size_t j = 0; j < num_kmers; j++) {
+            if (rows[i][j] == '1') {
+                result[i * num_kmers + j] = 1;
+            }
+        }
+    }
+    return result;
+}
+
+/*
+  Generates `clusters` random rows of length `num_kmers` and follows each of them with
+  `children` copies with `mutations` flipped bits. The rows are returned in cluster
+  order, which is also the order the compression is expected to choose.
+*/
+std::vector<std::string> clustered_rows(
+    size_t clusters, size_t children, size_t num_kmers, size_t mutations, std::uint64_t seed
+) {
+    std::mt19937_64 rng(seed);
+    std::vector<std::string> result;
+    for (size_t cluster = 0; cluster < clusters; cluster++) {
+        std::string parent(num_kmers, '0');
+        for (size_t kmer_id = 0; kmer_id < num_kmers; kmer_id++) {
+            parent[kmer_id] = (rng() % 2 == 0 ? '0' : '1');
+        }
+        result.push_back(parent);
+        for (size_t child = 0; child < children; child++) {
+            std::string sequence = parent;
+            for (size_t i = 0; i < mutations; i++) {
+                size_t kmer_id = rng() % num_kmers;
+                sequence[kmer_id] = (sequence[kmer_id] == '0' ? '1' : '0');
+            }
+            result.push_back(sequence);
+        }
+    }
+    return result;
+}
+
+// Arbitrary integer weights for the kmers. Integers are exact in `double`, so we can
+// compare the scores for equality even though the matrix may sum them in another order.
+double kmer_weight(size_t kmer_id) {
+    return static_cast<double>(kmer_id % 7) - 3.0;
+}
+
+/*
+  Checks every query in the matrix against the reference rows. Does not assume anything
+  about the number of `kmer_score` calls in `score_sequences`, as that is unspecified.
+*/
+void check_queries(
+    const std::string& name, const KmerPresenceMatrix& matrix,
+    const std::vector<std::string>& rows, size_t num_kmers
+) {
+    REQUIRE(matrix.get_num_sequences() == rows.size());
+    REQUIRE(matrix.get_num_kmers() == num_kmers);
+    REQUIRE(matrix.size() == rows.size() * num_kmers);
+    REQUIRE(matrix.empty() == (rows.size() * num_kmers == 0));
+    REQUIRE(matrix.get_num_parents() <= rows.size());
+
+    // Number of present kmers in each sequence, and in total.
+    size_t total_present = 0;
+    for (size_t i = 0; i < rows.size(); i++) {
+        size_t expected = 0;
+        for (size_t j = 0; j < num_kmers; j++) {
+            expected += (rows[i][j] == '1');
+        }
+        if (matrix.get_num_present(i) != expected) {
+            std::cerr << name << ": wrong number of present kmers in sequence " << i << std::endl;
+        }
+        REQUIRE(matrix.get_num_present(i) == expected);
+        total_present += expected;
+    }
+    REQUIRE(matrix.get_total_present() == total_present);
+    REQUIRE(matrix.get_num_present(rows.size()) == 0);
+
+    // Iterating over the kmers in a single sequence.
+    for (size_t i = 0; i < rows.size(); i++) {
+        std::vector<bool> found;
+        matrix.for_each_kmer(i, [&](size_t kmer_id, bool is_present) {
+            REQUIRE(kmer_id == found.size());
+            found.push_back(is_present);
+        });
+        if (found.size() != num_kmers) {
+            std::cerr << name << ": wrong number of kmers in sequence " << i << std::endl;
+        }
+        REQUIRE(found.size() == num_kmers);
+        for (size_t j = 0; j < num_kmers; j++) {
+            if (found[j] != (rows[i][j] == '1')) {
+                std::cerr << name << ": wrong value for kmer " << j << " in sequence " << i << std::endl;
+            }
+            REQUIRE(found[j] == (rows[i][j] == '1'));
+        }
+    }
+
+    // Out-of-range sequences do not produce any calls.
+    {
+        size_t calls = 0;
+        matrix.for_each_kmer(rows.size(), [&](size_t, bool) { calls++; });
+        REQUIRE(calls == 0);
+    }
+
+    // Iterating over the kmers in two sequences, including a sequence with itself.
+    for (size_t i = 0; i < rows.size(); i++) {
+        for (size_t j = i; j < rows.size(); j++) {
+            std::vector<size_t> found;
+            matrix.for_each_kmer(i, j, [&](size_t kmer_id, size_t num_present) {
+                REQUIRE(kmer_id == found.size());
+                found.push_back(num_present);
+            });
+            if (found.size() != num_kmers) {
+                std::cerr << name << ": wrong number of kmers in sequences " << i << ", " << j << std::endl;
+            }
+            REQUIRE(found.size() == num_kmers);
+            for (size_t kmer_id = 0; kmer_id < num_kmers; kmer_id++) {
+                size_t expected = (rows[i][kmer_id] == '1') + (rows[j][kmer_id] == '1');
+                if (found[kmer_id] != expected) {
+                    std::cerr << name << ": wrong count for kmer " << kmer_id
+                              << " in sequences " << i << ", " << j << std::endl;
+                }
+                REQUIRE(found[kmer_id] == expected);
+            }
+        }
+    }
+
+    // Scoring the sequences.
+    {
+        std::vector<size_t> reported(rows.size(), 0);
+        std::vector<double> scores(rows.size(), 0.0);
+        matrix.score_sequences(
+            [](size_t kmer_id, bool is_present) -> double {
+                return (is_present ? 1.0 : -1.0) * kmer_weight(kmer_id);
+            },
+            [&](size_t sequence, double score) {
+                REQUIRE(sequence < rows.size());
+                reported[sequence]++;
+                scores[sequence] = score;
+            }
+        );
+        for (size_t i = 0; i < rows.size(); i++) {
+            REQUIRE(reported[i] == 1);
+            double expected = 0.0;
+            for (size_t j = 0; j < num_kmers; j++) {
+                expected += (rows[i][j] == '1' ? 1.0 : -1.0) * kmer_weight(j);
+            }
+            if (scores[i] != expected) {
+                std::cerr << name << ": wrong score for sequence " << i << std::endl;
+            }
+            REQUIRE(scores[i] == expected);
+        }
+    }
+}
+
+/*
+  Builds the matrix from the reference rows, checks every query in it, and then checks
+  that the queries still give the same answers after a serialization round trip.
+  Returns the matrix for further checks.
+*/
+KmerPresenceMatrix check_matrix(
+    const std::string& name, const std::vector<std::string>& rows, size_t num_kmers, bool compress
+) {
+    KmerPresenceMatrix matrix(rows.size(), num_kmers, build_bitvector(rows, num_kmers), compress);
+    check_queries(name, matrix, rows, num_kmers);
+
+    std::stringstream stream;
+    matrix.simple_sds_serialize(stream);
+    REQUIRE(stream.str().length() == 8 * matrix.simple_sds_size());
+
+    KmerPresenceMatrix loaded;
+    loaded.simple_sds_load(stream);
+    REQUIRE(loaded.get_num_parents() == matrix.get_num_parents());
+    check_queries(name + " (loaded)", loaded, rows, num_kmers);
+
+    return matrix;
+}
+
 } // anonymous namespace
+
+//------------------------------------------------------------------------------
+
+TEST_CASE("Empty kmer presence matrix", "[haplotypes]") {
+    SECTION("default constructor") {
+        KmerPresenceMatrix matrix;
+        check_queries("default", matrix, {}, 0);
+        REQUIRE(matrix.get_num_parents() == 0);
+    }
+
+    SECTION("no sequences, no kmers") {
+        for (bool compress : { false, true }) {
+            KmerPresenceMatrix matrix = check_matrix("no sequences, no kmers", {}, 0, compress);
+            REQUIRE(matrix.get_num_parents() == 0);
+        }
+    }
+
+    SECTION("no sequences") {
+        for (bool compress : { false, true }) {
+            // The number of kmers is normalized to 0, as it cannot be recovered.
+            KmerPresenceMatrix matrix(0, 5, sdsl::bit_vector(), compress);
+            REQUIRE(matrix.get_num_kmers() == 0);
+            check_queries("no sequences", matrix, {}, 0);
+        }
+    }
+
+    SECTION("no kmers") {
+        for (bool compress : { false, true }) {
+            KmerPresenceMatrix matrix = check_matrix("no kmers", { "", "", "" }, 0, compress);
+            // Without kmers, all sequences are identical and form a single cluster.
+            REQUIRE(matrix.get_num_parents() == (compress ? 1 : 3));
+        }
+    }
+}
+
+//------------------------------------------------------------------------------
+
+TEST_CASE("Uncompressed kmer presence matrix", "[haplotypes]") {
+    std::vector<std::string> rows {
+        "00000",
+        "11111",
+        "10110",
+        "01001"
+    };
+
+    SECTION("every sequence is a parent") {
+        KmerPresenceMatrix matrix = check_matrix("uncompressed", rows, 5, false);
+        REQUIRE(matrix.get_num_parents() == rows.size());
+    }
+
+    SECTION("a single sequence") {
+        KmerPresenceMatrix matrix = check_matrix("single sequence", { "10110" }, 5, false);
+        REQUIRE(matrix.get_num_parents() == 1);
+    }
+
+    SECTION("a single kmer") {
+        KmerPresenceMatrix matrix = check_matrix("single kmer", { "0", "1", "1" }, 1, false);
+        REQUIRE(matrix.get_num_parents() == 3);
+    }
+}
+
+//------------------------------------------------------------------------------
+
+TEST_CASE("Compressed kmer presence matrix", "[haplotypes]") {
+    SECTION("identical sequences") {
+        std::vector<std::string> rows(8, std::string(128, '0'));
+        for (size_t i = 0; i < 128; i += 3) {
+            for (std::string& row : rows) { row[i] = '1'; }
+        }
+        KmerPresenceMatrix matrix = check_matrix("identical", rows, 128, true);
+        REQUIRE(matrix.get_num_parents() == 1);
+
+        KmerPresenceMatrix uncompressed(rows.size(), 128, build_bitvector(rows, 128), false);
+        REQUIRE(matrix.simple_sds_size() < uncompressed.simple_sds_size());
+    }
+
+    SECTION("clustered sequences") {
+        std::vector<std::string> rows = clustered_rows(3, 10, 256, 3, 0xdeadbeef);
+        KmerPresenceMatrix matrix = check_matrix("clustered", rows, 256, true);
+        REQUIRE(matrix.get_num_parents() == 3);
+
+        KmerPresenceMatrix uncompressed(rows.size(), 256, build_bitvector(rows, 256), false);
+        REQUIRE(matrix.simple_sds_size() < uncompressed.simple_sds_size());
+    }
+
+    SECTION("distinct sequences") {
+        // Random rows differ in around half of the kmers, which is far too many.
+        std::vector<std::string> rows = clustered_rows(16, 0, 64, 0, 0x12345678);
+        KmerPresenceMatrix matrix = check_matrix("distinct", rows, 64, true);
+        REQUIRE(matrix.get_num_parents() == rows.size());
+    }
+
+    SECTION("a single sequence") {
+        KmerPresenceMatrix matrix = check_matrix("single sequence", { "10110" }, 5, true);
+        REQUIRE(matrix.get_num_parents() == 1);
+    }
+
+    SECTION("a single kmer") {
+        // With one kmer, only identical sequences can be clustered together.
+        KmerPresenceMatrix matrix = check_matrix("single kmer", { "0", "1", "1" }, 1, true);
+        REQUIRE(matrix.get_num_parents() == 2);
+    }
+
+    SECTION("duplicates of distinct sequences") {
+        std::vector<std::string> distinct = clustered_rows(4, 0, 64, 0, 0x87654321);
+        std::vector<std::string> rows;
+        for (size_t i = 0; i < 3; i++) {
+            rows.insert(rows.end(), distinct.begin(), distinct.end());
+        }
+        KmerPresenceMatrix matrix = check_matrix("duplicates", rows, 64, true);
+        REQUIRE(matrix.get_num_parents() == distinct.size());
+    }
+}
+
+//------------------------------------------------------------------------------
+
+TEST_CASE("Kmer presence matrix dimensions", "[haplotypes]") {
+    // These exercise the 64-bit block boundaries in the queries and in the compression.
+    std::vector<size_t> kmer_counts { 1, 2, 63, 64, 65, 127, 128, 129, 200 };
+
+    for (size_t num_kmers : kmer_counts) {
+        std::vector<std::string> rows = clustered_rows(2, 3, num_kmers, 1, num_kmers);
+        for (bool compress : { false, true }) {
+            std::string name = "kmers " + std::to_string(num_kmers) + (compress ? " (compressed)" : "");
+            KmerPresenceMatrix matrix = check_matrix(name, rows, num_kmers, compress);
+            REQUIRE(matrix.get_num_parents() >= 1);
+            REQUIRE(matrix.get_num_parents() <= rows.size());
+        }
+    }
+}
+
+//------------------------------------------------------------------------------
+
+TEST_CASE("Invalid kmer presence matrix", "[haplotypes]") {
+    SECTION("wrong matrix size") {
+        for (bool compress : { false, true }) {
+            REQUIRE_THROWS_AS(
+                KmerPresenceMatrix(3, 5, sdsl::bit_vector(14, 0), compress),
+                std::runtime_error
+            );
+        }
+    }
+}
 
 //------------------------------------------------------------------------------
 

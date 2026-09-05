@@ -16,7 +16,6 @@ namespace vg {
 
 //------------------------------------------------------------------------------
 
-// FIXME: tests
 /**
  * A compressed binary matrix with haplotype sequences as rows and k-mers as columns.
  * Set bits indicate k-mers that are present in the corresponding sequence.
@@ -32,8 +31,8 @@ public:
     /// Default constructor that creates an empty k-mer presence matrix.
     KmerPresenceMatrix();
 
-    // FIXME: implement compression
-    /// Constructor from a given uncompressed matrix.
+    /// Constructor from a given uncompressed matrix, where sequence `i` contains
+    /// kmer `j` if and only if `matrix[i * num_kmers + j] == 1`.
     /// Throws `std::runtime_error` if the dimensions do not match.
     /// Moves the matrix into the object when `compress` is `false`.
     KmerPresenceMatrix(size_t num_sequences, size_t num_kmers, sdsl::bit_vector&& matrix, bool compress);
@@ -43,9 +42,9 @@ public:
     KmerPresenceMatrix& operator=(const KmerPresenceMatrix& other) = default;
     KmerPresenceMatrix& operator=(KmerPresenceMatrix&& other) noexcept = default;
 
-    /// Returns the size of the matrix (the total number of kmer occurrences).
+    /// Returns the size of the matrix (the number of cells in it).
     size_t size() const {
-        return this->parents.size() + this->children.size();
+        return this->num_sequences * this->num_kmers;
     }
 
     /// Returns `true` if the matrix is empty.
@@ -61,6 +60,15 @@ public:
     /// Returns the number of kmers (columns) in the matrix.
     size_t get_num_kmers() const {
         return this->num_kmers;
+    }
+
+    /// Returns the number of clusters, which is also the number of sequences
+    /// stored explicitly as parents.
+    size_t get_num_parents() const {
+        if (this->num_sequences == 0) {
+            return 0;
+        }
+        return this->parent_rank(this->num_sequences - 1) + 1;
     }
 
     /// Returns the number of present kmers in the given sequence.
@@ -140,6 +148,7 @@ private:
     }
 
     // An iterator over all kmers in a sequence.
+    // If the sequence is a parent, `child_iter` is at the end and never matches.
     struct Iterator {
         const KmerPresenceMatrix& matrix;
         size_t parent_start;

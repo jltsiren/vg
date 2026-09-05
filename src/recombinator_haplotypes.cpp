@@ -23,7 +23,60 @@ constexpr std::uint64_t Haplotypes::Header::DEFAULT_K;
 
 //------------------------------------------------------------------------------
 
-KmerPresenceMatrix::KmerPresenceMatrix() : num_sequences(0), num_kmers(0) {   
+namespace {
+
+// Returns the Hamming distance between the given rows of an uncompressed matrix.
+// Stops as soon as the distance exceeds `limit` and returns a value greater than
+// `limit` in that case.
+size_t row_distance(
+    const sdsl::bit_vector& matrix, size_t num_kmers,
+    size_t row_a, size_t row_b, size_t limit
+) {
+    size_t start_a = row_a * num_kmers, start_b = row_b * num_kmers;
+    size_t result = 0;
+    for (size_t kmer_id = 0; kmer_id < num_kmers && result <= limit; kmer_id += 64) {
+        size_t bits = std::min(static_cast<size_t>(64), num_kmers - kmer_id);
+        std::uint64_t word_a = matrix.get_int(start_a + kmer_id, bits);
+        std::uint64_t word_b = matrix.get_int(start_b + kmer_id, bits);
+        result += sdsl::bits::cnt(word_a ^ word_b);
+    }
+    return result;
+}
+
+// Returns the largest Hamming distance `d` for which it is worth storing a sequence
+// as a child instead of a parent.
+//
+// An Elias-Fano encoded bitvector uses around `log2(gap) + 2.5` bits per set bit, and
+// the average gap between the flipped bits in a child is around `num_kmers / d`. Hence
+// storing the child is worthwhile when `d * (log2(num_kmers / d) + 2.5) <= num_kmers`,
+// while an explicit parent always takes `num_kmers` bits. The predicate is monotone
+// over `d` in `[0, num_kmers]`, because the cost is at least `2.5 * d` and therefore
+// always too high once `d > 0.4 * num_kmers`. We can hence binary search for the
+// threshold.
+size_t max_child_distance(size_t num_kmers) {
+    if (num_kmers == 0) {
+        return 0;
+    }
+    auto worth_it = [num_kmers](size_t d) -> bool {
+        if (d == 0) {
+            return true;
+        }
+        double cost = d * (std::log2(static_cast<double>(num_kmers) / d) + 2.5);
+        return (cost <= static_cast<double>(num_kmers));
+    };
+
+    // Invariant: `worth_it(low)` is true and `worth_it(high)` is false.
+    size_t low = 0, high = num_kmers + 1;
+    while (high - low > 1) {
+        size_t mid = low + (high - low) / 2;
+        if (worth_it(mid)) { low = mid; } else { high = mid; }
+    }
+    return low;
+}
+
+} // anonymous namespace
+
+KmerPresenceMatrix::KmerPresenceMatrix() : num_sequences(0), num_kmers(0) {
 }
 
 KmerPresenceMatrix::KmerPresenceMatrix(size_t num_sequences, size_t num_kmers, sdsl::bit_vector&& matrix, bool compress) :
@@ -33,11 +86,13 @@ KmerPresenceMatrix::KmerPresenceMatrix(size_t num_sequences, size_t num_kmers, s
     if (matrix.size() != num_sequences * num_kmers) {
         throw std::runtime_error("KmerPresenceMatrix: inconsistent matrix size");
     }
+    if (this->num_sequences == 0) {
+        // Without sequences, there is no way of telling the number of kmers from the
+        // serialized object. Normalize the dimensions to make the object round-trip.
+        this->num_kmers = 0;
+    }
 
-    if (compress) {
-        // FIXME: implement compression
-        throw std::runtime_error("KmerPresenceMatrix: compression not implemented");
-    } else {
+    if (!compress) {
         for (size_t i = 0; i < this->num_sequences; i++) {
             this->arrays[i] = i;
             this->arrays[this->num_sequences + i] = i;
@@ -45,7 +100,98 @@ KmerPresenceMatrix::KmerPresenceMatrix(size_t num_sequences, size_t num_kmers, s
         }
         this->parents = std::move(matrix);
         this->children = sdsl::sd_vector<>();
+        return;
     }
+
+    // Greedy leader clustering: compare each sequence to the parents chosen so far and
+    // attach it to the closest one within the threshold. This takes
+    // `O(num_sequences * num_parents * num_kmers / 64)` time in the worst case, but the
+    // early exits make it much faster when the sequences form a few large clusters.
+    size_t threshold = max_child_distance(this->num_kmers);
+    std::vector<size_t> parent_of_cluster;
+    std::vector<std::vector<size_t>> children_of_cluster;
+    size_t total_flips = 0;
+    for (size_t sequence = 0; sequence < this->num_sequences; sequence++) {
+        size_t best_cluster = parent_of_cluster.size(), best_distance = threshold + 1;
+        for (size_t cluster = 0; cluster < parent_of_cluster.size(); cluster++) {
+            size_t distance = row_distance(
+                matrix, this->num_kmers, sequence, parent_of_cluster[cluster], best_distance - 1
+            );
+            if (distance < best_distance) {
+                best_cluster = cluster; best_distance = distance;
+                if (distance == 0) { break; }
+            }
+        }
+        if (best_cluster >= parent_of_cluster.size()) {
+            parent_of_cluster.push_back(sequence);
+            children_of_cluster.emplace_back();
+        } else {
+            // A distance below the limit was never truncated, so `best_distance` is exact.
+            children_of_cluster[best_cluster].push_back(sequence);
+            total_flips += best_distance;
+        }
+    }
+    size_t num_parents = parent_of_cluster.size();
+    size_t num_children = this->num_sequences - num_parents;
+
+    // Store the sequences in cluster order, with the parent of each cluster first.
+    // This is also the order of the children in `children`, because
+    // `child_rank(rank) == rank - parent_rank(rank) - 1`.
+    size_t rank = 0;
+    for (size_t cluster = 0; cluster < num_parents; cluster++) {
+        auto add_sequence = [&](size_t sequence) {
+            this->arrays[sequence] = rank;
+            this->arrays[this->num_sequences + rank] = sequence;
+            this->arrays[2 * this->num_sequences + rank] = cluster;
+            rank++;
+        };
+        add_sequence(parent_of_cluster[cluster]);
+        for (size_t sequence : children_of_cluster[cluster]) {
+            add_sequence(sequence);
+        }
+    }
+
+    // Copy the parents.
+    this->parents = sdsl::bit_vector(num_parents * this->num_kmers, 0);
+    for (size_t cluster = 0; cluster < num_parents; cluster++) {
+        size_t from = parent_of_cluster[cluster] * this->num_kmers;
+        size_t to = cluster * this->num_kmers;
+        for (size_t kmer_id = 0; kmer_id < this->num_kmers; kmer_id += 64) {
+            size_t bits = std::min(static_cast<size_t>(64), this->num_kmers - kmer_id);
+            this->parents.set_int(to + kmer_id, matrix.get_int(from + kmer_id, bits), bits);
+        }
+    }
+
+    // Build the children by marking the bits that differ from the parent.
+    // NOTE: If there are no differences at all, `sd_vector` falls back to a low part of
+    // width 1, and the high part takes around `num_children * num_kmers / 2` bits. That
+    // is still half of the corresponding explicit bitvectors, but it is not proportional
+    // to the number of set bits.
+    if (num_children == 0 || this->num_kmers == 0) {
+        this->children = sdsl::sd_vector<>();
+        return;
+    }
+    sdsl::sd_vector_builder builder(num_children * this->num_kmers, total_flips);
+    size_t child = 0;
+    for (size_t cluster = 0; cluster < num_parents; cluster++) {
+        size_t parent_start = parent_of_cluster[cluster] * this->num_kmers;
+        for (size_t sequence : children_of_cluster[cluster]) {
+            size_t child_start = child * this->num_kmers;
+            size_t sequence_start = sequence * this->num_kmers;
+            for (size_t kmer_id = 0; kmer_id < this->num_kmers; kmer_id += 64) {
+                size_t bits = std::min(static_cast<size_t>(64), this->num_kmers - kmer_id);
+                std::uint64_t word = matrix.get_int(sequence_start + kmer_id, bits)
+                    ^ matrix.get_int(parent_start + kmer_id, bits);
+                while (word != 0) {
+                    size_t offset = sdsl::bits::lo(word);
+                    builder.set_unsafe(child_start + kmer_id + offset);
+                    word &= word - 1;
+                }
+            }
+            child++;
+        }
+    }
+    this->children = sdsl::sd_vector<>(builder);
 }
 
 size_t KmerPresenceMatrix::get_num_present(size_t sequence) const {
@@ -180,7 +326,7 @@ void KmerPresenceMatrix::simple_sds_load(std::istream& in) {
 
     this->num_sequences = this->arrays.size() / 3;
     if (this->arrays.size() != this->num_sequences * 3) {
-        throw std::runtime_error("KmerPresenceMatrix: inconsistent array size");
+        throw sdsl::simple_sds::InvalidData("KmerPresenceMatrix: inconsistent array size");
     }
 
     if (this->num_sequences == 0) {
@@ -189,7 +335,24 @@ void KmerPresenceMatrix::simple_sds_load(std::istream& in) {
         this->num_kmers = (this->parents.size() + this->children.size()) / this->num_sequences;
     }
     if (this->parents.size() + this->children.size() != this->num_kmers * this->num_sequences) {
-        throw std::runtime_error("KmerPresenceMatrix: inconsistent matrix size");
+        throw sdsl::simple_sds::InvalidData("KmerPresenceMatrix: inconsistent matrix size");
+    }
+
+    // The queries use the arrays for indexing into `parents` and `children` without
+    // further checks, so we validate the structure before trusting it.
+    for (size_t rank = 0; rank < this->num_sequences; rank++) {
+        size_t parent = this->parent_rank(rank);
+        size_t previous = (rank == 0 ? 0 : this->parent_rank(rank - 1));
+        if (rank == 0 ? parent != 0 : (parent != previous && parent != previous + 1)) {
+            throw sdsl::simple_sds::InvalidData("KmerPresenceMatrix: invalid parent ranks");
+        }
+        size_t sequence = this->rank_to_sequence(rank);
+        if (sequence >= this->num_sequences || this->sequence_to_rank(sequence) != rank) {
+            throw sdsl::simple_sds::InvalidData("KmerPresenceMatrix: invalid sequence order");
+        }
+    }
+    if (this->get_num_parents() * this->num_kmers != this->parents.size()) {
+        throw sdsl::simple_sds::InvalidData("KmerPresenceMatrix: inconsistent number of parents");
     }
 }
 
@@ -198,8 +361,16 @@ size_t KmerPresenceMatrix::simple_sds_size() const {
 }
 
 KmerPresenceMatrix::Iterator::Iterator(const KmerPresenceMatrix& matrix, size_t sequence) :
-    matrix(matrix)
+    matrix(matrix),
+    parent_start(0), child_start(0), child_iter(matrix.children.one_end()),
+    kmer_id(0), is_present(false)
 {
+    if (sequence >= this->matrix.num_sequences) {
+        // Create an iterator that is already at the end.
+        this->kmer_id = this->matrix.num_kmers;
+        return;
+    }
+
     size_t rank = this->matrix.sequence_to_rank(sequence);
     this->parent_start = this->matrix.parent_rank(rank) * this->matrix.num_kmers;
     if (!this->matrix.is_parent(rank)) {
@@ -207,7 +378,6 @@ KmerPresenceMatrix::Iterator::Iterator(const KmerPresenceMatrix& matrix, size_t 
         this->child_iter = this->matrix.children.successor(this->child_start);
     }
 
-    this->kmer_id = 0;
     this->update_is_present();
 }
 
