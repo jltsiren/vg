@@ -24,7 +24,8 @@ namespace vg {
  * The compression assumes that the matrix consists of clusters of similar sequences.
  * We choose one sequence from each cluster as a parent and store it explicitly.
  * For the other sequences (children), we only store the symmetric difference
- * with their parent sequence.
+ * with their parent sequence. The internal representation reorders the sequences so
+ * that the parent of each cluster appears first, followed by its children.
  */
 class KmerPresenceMatrix {
 public:
@@ -135,7 +136,7 @@ private:
         if(rank == 0) {
             return true;
         }
-        return this->parent_rank(rank) != this->parent_rank(rank - 1);
+        return (this->parent_rank(rank) != this->parent_rank(rank - 1));
     }
 
     // An iterator over all kmers in a sequence.
@@ -148,10 +149,14 @@ private:
         bool is_present;
 
         Iterator(const KmerPresenceMatrix& matrix, size_t sequence);
-        void operator++();
+
+        void operator++() {
+            this->kmer_id++;
+            this->update_is_present();
+        }
 
         bool end() const {
-            return this->kmer_id >= this->matrix.num_kmers;
+            return (this->kmer_id >= this->matrix.num_kmers);
         }
 
     private:

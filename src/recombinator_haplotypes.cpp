@@ -211,11 +211,6 @@ KmerPresenceMatrix::Iterator::Iterator(const KmerPresenceMatrix& matrix, size_t 
     this->update_is_present();
 }
 
-void KmerPresenceMatrix::Iterator::operator++() {
-    ++this->kmer_id;
-    this->update_is_present();
-}
-
 void KmerPresenceMatrix::Iterator::update_is_present() {
     if (!this->end()) {
         this->is_present = this->matrix.parents[this->parent_start + this->kmer_id];
