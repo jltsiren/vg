@@ -30,14 +30,6 @@ constexpr size_t Recombinator::MIN_GREF_LENGTH;
 
 //------------------------------------------------------------------------------
 
-// Returns true if the path is a gref fragment (`gref_CHM13#0#chr1_7_alt`), even if it
-// has already been clipped (`gref_CHM13#0#chr1_7_alt[500]`).
-bool is_gref_fragment(const gbwtgraph::GBWTGraph& graph, path_handle_t path) {
-    return GrefCover::is_gref_derived(graph.get_path_name(path)) && GrefCover::is_gref_name(graph.get_locus_name(path));
-}
-
-//------------------------------------------------------------------------------
-
 HaplotypePartitioner::HaplotypePartitioner(
     const gbwtgraph::GBZ& gbz,
     const gbwt::FastLocate& r_index,
@@ -129,7 +121,8 @@ Haplotypes HaplotypePartitioner::partition_haplotypes(const Parameters& paramete
     // change them. Skip gref fragments (`chr1_7_alt`) and loci in the reserved gref namespace
     // (`gref_x`, a non-PanSN copy); a PanSN gref copy (`gref_CHM13#0#chr1`) has the base locus.
     auto contig_names = jobs.contig_names(this->gbz.graph, [&](const path_handle_t& path) -> bool {
-        return !GrefCover::is_gref_derived(this->gbz.graph.get_locus_name(path)) && !is_gref_fragment(this->gbz.graph, path);
+        std::string path_name = this->gbz.graph.get_path_name(path);
+        return !GrefCover::is_gref_derived(this->gbz.graph.get_locus_name(path)) && !GrefCover::is_gref_fragment(path_name);
     });
     for (size_t job_id = 0; job_id < result.jobs(); job_id++) {
         for (auto& chain : chains_by_job[job_id]) {
@@ -1546,7 +1539,8 @@ gbwt::GBWT Recombinator::generate_haplotypes(const std::string& kff_file, const 
             size_t job_id = this->jobs_for_cached_paths[i];
             gbwt::size_type path_id = this->gbz.graph.named_paths[i].id;
             if (job_id < this->haplotypes.jobs() && excluded_path_ids.find(path_id) == excluded_path_ids.end()) {
-                if (is_gref_fragment(this->gbz.graph, handlegraph::as_path_handle(i))) {
+                std::string path_name = this->gbz.graph.get_path_name(handlegraph::as_path_handle(i));
+                if (GrefCover::is_gref_fragment(path_name)) {
                     gref_fragment_paths[job_id].push_back(path_id);
                 } else {
                     reference_paths[job_id].push_back(path_id);

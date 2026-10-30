@@ -1,6 +1,7 @@
 #include "gbwtgraph_helper.hpp"
 #include "gbwt_helper.hpp"
 #include "gbzgraph.hpp"
+#include "gref.hpp"
 
 #include <gbwtgraph/index.h>
 #include <vg/io/alignment_io.hpp>
@@ -384,9 +385,13 @@ size_t estimate_hash_table_size(const gbwtgraph::GBZ& gbz, bool progress) {
     std::vector<path_handle_t> generic_paths;
     for (const gbwtgraph::NamedPath& named_path : gbz.graph.named_paths) {
         if (named_path.sense == PathSense::REFERENCE) {
-            gbwt::PathName path_name = gbz.index.metadata.path(named_path.id);
             path_handle_t path_handle = gbz.graph.path_to_handle(named_path.id);
-            paths_by_ref_sample[path_name.sample].push_back(path_handle);
+            std::string path_name = gbz.graph.get_path_name(path_handle);
+            if (!GrefCover::is_gref_fragment(path_name)) {
+                // If this is a gref sample, only consider the primary reference and ignore the fragments.
+                gbwt::PathName gbwt_name = gbz.index.metadata.path(named_path.id);
+                paths_by_ref_sample[gbwt_name.sample].push_back(path_handle);
+            }
         } else if (named_path.sense == PathSense::GENERIC) {
             path_handle_t path_handle = gbz.graph.path_to_handle(named_path.id);
             std::string path_name = gbz.graph.get_path_name(path_handle);
