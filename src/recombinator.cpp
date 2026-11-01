@@ -1,5 +1,4 @@
 #include "recombinator.hpp"
-#include "decomposition_neighbors.hpp"
 
 #include "gref.hpp"
 #include "statistics.hpp"
@@ -27,6 +26,17 @@ constexpr double Recombinator::PRESENT_DISCOUNT;
 constexpr double Recombinator::HET_ADJUSTMENT;
 constexpr double Recombinator::ABSENT_SCORE;
 constexpr size_t Recombinator::MIN_GREF_LENGTH;
+
+//------------------------------------------------------------------------------
+
+// Returns true if the path belongs to a gref cover: a copy of a reference path
+// (`gref_CHM13#0#chr1`, or `gref_x` for a generic path) or a fragment of one.
+bool is_gref_path(const gbwt::FullPathName& path_name) {
+    if (path_name.sample_name == gbwtgraph::GENERIC_PATH_SAMPLE_NAME) {
+        return GrefCover::is_gref_derived(path_name.contig_name);
+    }
+    return GrefCover::is_gref_derived(path_name.sample_name);
+}
 
 //------------------------------------------------------------------------------
 
@@ -239,21 +249,6 @@ bool HaplotypePartitioner::contains_reversals(handle_t handle) const {
     return false;
 }
 
-net_handle_t follow_chain(const SnarlDistanceIndex& distance_index, const gbwtgraph::GBZ& gbz, size_t chain_id, net_handle_t curr) {
-    net_handle_t next = curr;
-    size_t successors = 0;
-    for_each_neighbor(distance_index, next, &gbz.graph, false, [&](const net_handle_t& child) {
-        successors++;
-        next = child;
-    });
-    if (successors != 1) {
-        std::string msg = "HaplotypePartitioner::follow_chain(): chain " + std::to_string(chain_id) +
-            " has " + std::to_string(successors) + " successors for a child";
-        throw std::runtime_error(msg);
-    }
-    return next;
-}
-
 std::vector<HaplotypePartitioner::Subchain>
 HaplotypePartitioner::get_subchains(const gbwtgraph::TopLevelChain& chain, const Parameters& parameters) const {
     std::vector<Subchain> result;
@@ -263,10 +258,13 @@ HaplotypePartitioner::get_subchains(const gbwtgraph::TopLevelChain& chain, const
     handle_t snarl_start = empty_gbwtgraph_handle();
     bool has_start = false;
     bool was_snarl = false;
-    // Closed interval of net handles.
-    net_handle_t curr = this->distance_index.get_bound(chain.chain, false, true);
+    // Closed interval of net handles, from the start bound to the end bound.
+    // We list the children of the chain instead of stepping with
+    // follow_net_edges(), which gives only traversals that a walk can take and
+    // so cannot step over a snarl that no walk crosses. Such snarls are split
+    // below.
     net_handle_t chain_end = this->distance_index.get_bound(chain.chain, true, false);
-    while (true) {
+    this->distance_index.for_each_child(chain.chain, [&](const net_handle_t& curr) -> bool {
         if (this->distance_index.is_node(curr)) {
             handle_t handle = this->distance_index.get_handle(curr, &this->gbz.graph);
             if (was_snarl) {
@@ -293,11 +291,8 @@ HaplotypePartitioner::get_subchains(const gbwtgraph::TopLevelChain& chain, const
         }
 
         // We check the loop condition here, as we have an inclusive endpoint.
-        if (curr == chain_end) {
-            break;
-        }
-        curr = follow_chain(this->distance_index, this->gbz, chain.offset, curr);
-    }
+        return curr != chain_end;
+    });
     if (was_snarl && has_start) {
         // If the chain ends with a snarl, we take it as a suffix.
         snarls.push_back({ Haplotypes::Subchain::suffix, snarl_start, empty_gbwtgraph_handle(), 0, 0 });
@@ -1845,7 +1840,11 @@ std::vector<std::pair<size_t, double>> select_haplotypes(
         gbwt::size_type path_id = gbwt::Path::id(sequence_id);
         gbwt::FullPathName path_name = gbz.index.metadata.fullPath(path_id);
 
-        if (parameters.banned_samples.find(path_name.sample_name) == parameters.banned_samples.end()) {
+        // A gref cover is never a candidate. Its copy of the reference would take haplotype
+        // slots while adding nothing the reference does not, and its fragments are pieces
+        // of other haplotypes. Without it, a gref graph samples the same haplotypes as the
+        // graph it was computed from.
+        if (parameters.banned_samples.find(path_name.sample_name) == parameters.banned_samples.end() && !is_gref_path(path_name)) {
             remaining_haplotypes.push_back( { seq_offset, 0.0 });
         }
     }
